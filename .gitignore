@@ -1,6 +1,7 @@
 node_modules
 serviceAccountKey.json
 logs
+src/utils/firebase.js
 
 # dotenv environment variable files
 .env
