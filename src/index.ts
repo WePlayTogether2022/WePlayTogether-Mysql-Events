@@ -2,20 +2,13 @@ import mysql from "mysql";
 const MySQLEvents = require("@rodrigogs/mysql-events");
 import "dotenv/config";
 import { IMysqlEvent } from "./types/MysqlEvent";
-import GetStreamService from "./services/GetStreamService";
-import { User } from "./interfaces/User";
 import { Model } from "objection";
 import Knex from "knex";
 import { Users } from "./models/Users";
-import { Guilds } from "./models/Guilds";
-import { Guild } from "./interfaces/Guild";
-import { GetstreamChannels } from "./models/GetstreamChannels";
-import { boolean } from "boolean";
-import GetstreamChannelsController from "./controllers/GetstreamChannelsController";
+import UsersProfileViewsController from "./controllers/UsersProfileViewsController";
+import logger from "./utils/logger";
+import { UsersProfileViews } from "./models/UsersProfileViews";
 import UsersController from "./controllers/UsersController";
-import { GetstreamChannel } from "./interfaces/GetstreamChannel";
-import GetstreamActionsController from "./controllers/GetstreamActionsController";
-import { GetstreamActions } from "./models/GetstreamActions";
 
 const dbConnection = {
   client: "mysql",
@@ -36,6 +29,9 @@ const dbConnection = {
 
 const knex = Knex(dbConnection);
 
+const MAX_RETRIES = 3; // Numero massimo di tentativi di retry
+const INITIAL_DELAY = 1000; // Ritardo iniziale tra i tentativi di retry (in millisecondi)
+
 const program = async () => {
   const connection = mysql.createConnection({
     host: process.env.DB_HOST,
@@ -51,164 +47,75 @@ const program = async () => {
 
   await instance.start();
 
+  const executeWithRetry = async (action: () => Promise<void>, retries = 0) => {
+    try {
+      await action();
+    } catch (error) {
+      logger.debug(
+        `Errore durante l'esecuzione dell'azione (retry ${retries}): ${JSON.stringify(
+          error,
+          null,
+          2
+        )}`
+      ); // `
+
+      if (retries < MAX_RETRIES) {
+        const delay = INITIAL_DELAY * Math.pow(2, retries); // Calcolo del ritardo esponenziale
+        await new Promise((resolve) => setTimeout(resolve, delay));
+        await executeWithRetry(action, retries + 1); // Riprova l'azione ricorsivamente
+      } else {
+        throw error; // Se si raggiunge il numero massimo di tentativi, rilancia l'errore
+      }
+    }
+  };
+
   instance.addTrigger({
-    name: "monitoring getstream_actions",
-    expression: "WptDev.getstream_actions.*",
+    name: "monitoring users_profile_views",
+    expression: `${process.env.DB_DATABASE}.${UsersProfileViews.tableName}.*`,
     statement: MySQLEvents.STATEMENTS.ALL,
     onEvent: async (event: IMysqlEvent) => {
-      // console.log(
-      //   "Evento su getstream_actions: ",
-      //   JSON.stringify(event, null, 2)
-      // );
-      if (!event.table || event.table !== GetstreamActions.tableName) return;
+      if (!event.table || event.table !== UsersProfileViews.tableName) return;
 
-      let controller = new GetstreamActionsController();
+      let controller = new UsersProfileViewsController();
 
-      try {
-        await controller.executeAction(event);
-      } catch (error) {
-        console.log(error);
-      }
+      executeWithRetry(() => controller.executeAction(event))
+        .then(() => {})
+        .catch((error) => {
+          // Scrivo l'errore nel log
+          logger.error(
+            `Errore durante l'esecuzione dell'azione (Failed after ${MAX_RETRIES} retries): ${JSON.stringify(
+              error,
+              null,
+              2
+            )}`
+          );
+        });
     },
   });
 
-  // instance.addTrigger({
-  //   name: "monitoring users",
-  //   expression: "WptDev.users.*",
-  //   statement: MySQLEvents.STATEMENTS.ALL,
-  //   onEvent: async (event: IMysqlEvent) => {
-  //     if (!event.table || event.table !== Users.tableName) return;
+  instance.addTrigger({
+    name: "monitoring users",
+    expression: `${process.env.DB_DATABASE}.${Users.tableName}.*`,
+    statement: MySQLEvents.STATEMENTS.ALL,
+    onEvent: async (event: IMysqlEvent) => {
+      if (!event.table || event.table !== Users.tableName) return;
 
-  //     let controller = new UsersController();
+      let controller = new UsersController();
 
-  //     // You will receive the events here
-  //     if (event.type) {
-  //       switch (event.type) {
-  //         case MySQLEvents.STATEMENTS.INSERT:
-  //           await controller.createUser(event);
-  //           break;
-  //         case MySQLEvents.STATEMENTS.UPDATE:
-  //           try {
-  //             if (
-  //               event.affectedRows &&
-  //               event.affectedRows.length > 0 &&
-  //               event.affectedColumns &&
-  //               event.affectedColumns.length > 0 &&
-  //               event.affectedRows[0].after &&
-  //               event.affectedRows[0].before
-  //             ) {
-  //               if (event.affectedColumns.includes("deletedAt")) {
-  //                 let afterUser: User = event.affectedRows[0].after;
-  //                 if (afterUser.deletedAt !== null) {
-  //                   await controller.deleteUser(event);
-  //                 } else {
-  //                   // Faccio il restore dell'utente in GetStream
-  //                   console.log("restore", JSON.stringify(event, null, 2));
-  //                 }
-
-  //                 break;
-  //               } else {
-  //                 await controller.updateUser(event);
-  //               }
-  //             }
-  //           } catch (error) {
-  //             console.log(error);
-  //           }
-  //           break;
-  //         default:
-  //       }
-  //     }
-  //   },
-  // });
-
-  // instance.addTrigger({
-  //   name: "monitoring getstream_channels",
-  //   expression: "WptDev.getstream_channels.*",
-  //   statement: MySQLEvents.STATEMENTS.ALL,
-  //   onEvent: async (event: IMysqlEvent) => {
-  //     if (!event.table || event.table !== GetstreamChannels.tableName) return;
-
-  //     let controller = new GetstreamChannelsController();
-
-  //     if (event.type) {
-  //       switch (event.type) {
-  //         case MySQLEvents.STATEMENTS.INSERT:
-  //           try {
-  //             await controller.createGetStreamChannel(event);
-  //           } catch (error) {
-  //             console.log(error);
-  //           }
-  //           break;
-  //         case MySQLEvents.STATEMENTS.UPDATE:
-  //           try {
-  //             if (
-  //               event.affectedRows &&
-  //               event.affectedRows.length > 0 &&
-  //               event.affectedColumns &&
-  //               event.affectedColumns.length > 0 &&
-  //               event.affectedRows[0].after &&
-  //               event.affectedRows[0].before
-  //             ) {
-  //               if (event.affectedColumns.includes("deletedAt")) {
-  //                 let afterGetstreamChannel: GetstreamChannel =
-  //                   event.affectedRows[0].after;
-  //                 if (afterGetstreamChannel.deletedAt !== null) {
-  //                   await controller.deleteGetStreamChannel(event);
-  //                 } else {
-  //                   // Faccio il restore
-  //                   console.log("restore", JSON.stringify(event, null, 2));
-  //                 }
-
-  //                 break;
-  //               } else {
-  //                 // Facio l'update
-  //                 console.log("update", JSON.stringify(event, null, 2));
-  //               }
-  //             }
-  //           } catch (error) {
-  //             console.log(error);
-  //           }
-  //           break;
-  //         default:
-  //           console.log("GetstreamChannels", JSON.stringify(event, null, 2));
-  //           break;
-  //       }
-  //     }
-  //   },
-  // });
-
-  // instance.addTrigger({
-  //   name: "monitoring guilds",
-  //   expression: "WptDev.guilds.*",
-  //   statement: MySQLEvents.STATEMENTS.ALL,
-  //   onEvent: async (event: IMysqlEvent) => {
-  //     if (!event.table || event.table !== Guilds.tableName) return;
-
-  //     // You will receive the events here
-  //     if (event.type) {
-  //       switch (event.type) {
-  //         case MySQLEvents.STATEMENTS.INSERT:
-  //           break;
-  //         case MySQLEvents.STATEMENTS.UPDATE:
-  //           let controller = new GetstreamChannelsController();
-
-  //           if (
-  //             event.affectedRows &&
-  //             event.affectedRows.length > 0 &&
-  //             event.affectedColumns &&
-  //             event.affectedColumns.length > 0 &&
-  //             event.affectedRows[0].after &&
-  //             event.affectedRows[0].before
-  //           ) {
-  //             // Controllo se è cambiato il name/logoUrl
-  //             await controller.updateGuildGetStreamChannel(event);
-  //           }
-  //           break;
-  //         default:
-  //       }
-  //     }
-  //   },
-  // });
+      executeWithRetry(() => controller.executeAction(event))
+        .then(() => {})
+        .catch((error) => {
+          // Scrivo l'errore nel log
+          logger.error(
+            `Errore durante l'esecuzione dell'azione (Failed after ${MAX_RETRIES} retries): ${JSON.stringify(
+              error,
+              null,
+              2
+            )}`
+          );
+        });
+    },
+  });
 
   instance.on(MySQLEvents.EVENTS.CONNECTION_ERROR, console.error);
   instance.on(MySQLEvents.EVENTS.ZONGJI_ERROR, console.error);
